@@ -64,3 +64,8 @@ run_indexer_with_filtering.py
 
 # Cline files
 memory-bank/
+# Shell redirection artifacts
+=[0-9]*
+>[0-9]*
+*.tmp
+*.log
