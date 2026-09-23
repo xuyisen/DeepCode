@@ -5,9 +5,8 @@ Enhanced CLI Interface Module for DeepCode
 """
 
 import os
-import time
 import platform
-from typing import Optional
+import time
 
 
 class Colors:
@@ -40,10 +39,10 @@ class CLIInterface:
         self.is_running = True
         self.processing_history = []
         self.enable_indexing = True  # Default configuration
-        
+
         # Load segmentation config from the same source as UI
         self._load_segmentation_config()
-        
+
         # Initialize tkinter availability
         self._init_tkinter()
 
@@ -51,6 +50,7 @@ class CLIInterface:
         """Load segmentation configuration from mcp_agent.config.yaml"""
         try:
             from utils.llm_utils import get_document_segmentation_config
+
             seg_config = get_document_segmentation_config()
             self.segmentation_enabled = seg_config.get("enabled", True)
             self.segmentation_threshold = seg_config.get("size_threshold_chars", 50000)
@@ -62,9 +62,10 @@ class CLIInterface:
 
     def _save_segmentation_config(self):
         """Save segmentation configuration to mcp_agent.config.yaml"""
-        import yaml
         import os
-        
+
+        import yaml
+
         # Get the project root directory (where mcp_agent.config.yaml is located)
         current_file = os.path.abspath(__file__)
         cli_dir = os.path.dirname(current_file)  # cli directory
@@ -81,16 +82,22 @@ class CLIInterface:
                 config["document_segmentation"] = {}
 
             config["document_segmentation"]["enabled"] = self.segmentation_enabled
-            config["document_segmentation"]["size_threshold_chars"] = self.segmentation_threshold
+            config["document_segmentation"]["size_threshold_chars"] = (
+                self.segmentation_threshold
+            )
 
             # Write updated config
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 
-            print(f"{Colors.OKGREEN}✅ Document segmentation configuration updated{Colors.ENDC}")
+            print(
+                f"{Colors.OKGREEN}✅ Document segmentation configuration updated{Colors.ENDC}"
+            )
 
         except Exception as e:
-            print(f"{Colors.WARNING}⚠️ Failed to update segmentation config: {str(e)}{Colors.ENDC}")
+            print(
+                f"{Colors.WARNING}⚠️ Failed to update segmentation config: {e!s}{Colors.ENDC}"
+            )
 
     def _init_tkinter(self):
         """Initialize tkinter availability check"""
@@ -217,7 +224,7 @@ class CLIInterface:
         print(f"\n{Colors.BOLD}{Colors.OKCYAN}➤ Your choice: {Colors.ENDC}", end="")
         return input().strip().lower()
 
-    def upload_file_gui(self) -> Optional[str]:
+    def upload_file_gui(self) -> str | None:
         """Enhanced file upload interface with better error handling"""
         if not self.tkinter_available:
             self.print_status(
@@ -265,7 +272,7 @@ class CLIInterface:
                 return file_path
 
             except Exception as e:
-                self.print_status(f"File dialog error: {str(e)}", "error")
+                self.print_status(f"File dialog error: {e!s}", "error")
                 return self._get_manual_file_path()
 
         self.print_status("Opening file browser dialog...", "upload")
@@ -280,7 +287,7 @@ class CLIInterface:
             self.print_status("No file selected", "warning")
             return None
 
-    def _get_manual_file_path(self) -> Optional[str]:
+    def _get_manual_file_path(self) -> str | None:
         """Get file path through manual input with validation"""
         self.print_separator("─", 79, Colors.YELLOW)
         print(f"{Colors.BOLD}{Colors.YELLOW}📁 Manual File Path Input{Colors.ENDC}")
@@ -790,8 +797,8 @@ class CLIInterface:
 ║         ✗ Smart segmentation (Disabled)                                      ║
 ║                                                                               ║
 ║  {Colors.YELLOW}Current Settings:{Colors.CYAN}                                                         ║
-║    Pipeline: {'🧠 Comprehensive Mode' if self.enable_indexing else '⚡ Optimized Mode'}                                          ║
-║    Document: {'📄 Smart Segmentation' if segmentation_enabled else '📋 Traditional Processing'}                                ║
+║    Pipeline: {"🧠 Comprehensive Mode" if self.enable_indexing else "⚡ Optimized Mode"}                                          ║
+║    Document: {"📄 Smart Segmentation" if segmentation_enabled else "📋 Traditional Processing"}                                ║
 ║    Threshold: {segmentation_threshold} characters                                    ║
 ║                                                                               ║
 ║  {Colors.OKGREEN}[T] Toggle Pipeline    {Colors.BLUE}[S] Toggle Segmentation    {Colors.FAIL}[B] Back{Colors.CYAN}     ║

@@ -30,8 +30,10 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Callable
+from typing import Any
+
 import yaml
-from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # MCP Agent imports
 from mcp_agent.agents.agent import Agent
@@ -40,23 +42,23 @@ from mcp_agent.workflows.parallel.parallel_llm import ParallelLLM
 
 # Local imports
 from prompts.code_prompts import (
-    PAPER_INPUT_ANALYZER_PROMPT,
-    PAPER_DOWNLOADER_PROMPT,
-    PAPER_REFERENCE_ANALYZER_PROMPT,
     CHAT_AGENT_PLANNING_PROMPT,
+    PAPER_DOWNLOADER_PROMPT,
+    PAPER_INPUT_ANALYZER_PROMPT,
+    PAPER_REFERENCE_ANALYZER_PROMPT,
 )
 from utils.file_processor import FileProcessor
+from utils.llm_utils import (
+    get_adaptive_agent_config,
+    get_adaptive_prompts,
+    get_preferred_llm_class,
+    should_use_document_segmentation,
+)
+from workflows.agents.document_segmentation_agent import prepare_document_segments
 from workflows.code_implementation_workflow import CodeImplementationWorkflow
 from workflows.code_implementation_workflow_index import (
     CodeImplementationWorkflowWithIndex,
 )
-from utils.llm_utils import (
-    get_preferred_llm_class,
-    should_use_document_segmentation,
-    get_adaptive_agent_config,
-    get_adaptive_prompts,
-)
-from workflows.agents.document_segmentation_agent import prepare_document_segments
 
 # Environment configuration
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"  # Prevent .pyc file generation
@@ -65,76 +67,98 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"  # Prevent .pyc file generation
 def _assess_output_completeness(text: str) -> float:
     """
     智能评估输出完整性的高级算法
-    
+
     使用多种启发式方法来检测输出是否被截断：
     1. 结构化标记完整性检查
-    2. 句子完整性分析 
+    2. 句子完整性分析
     3. 代码块完整性验证
     4. 预期内容元素检查
-    
+
     Returns:
         float: 完整性分数 (0.0-1.0)，越高表示越完整
     """
     if not text or len(text.strip()) < 100:
         return 0.0
-    
+
     score = 0.0
     factors = 0
-    
+
     # 1. 基本长度检查 (权重: 0.2)
     if len(text) > 5000:  # 期望的最小输出长度
         score += 0.2
     elif len(text) > 2000:
         score += 0.1
     factors += 1
-    
+
     # 2. 结构完整性检查 (权重: 0.3)
     structure_indicators = [
-        "## 1.", "## 2.", "## 3.",  # 章节标题
-        "```", "file_structure", "implementation",
-        "algorithm", "method", "function"
+        "## 1.",
+        "## 2.",
+        "## 3.",  # 章节标题
+        "```",
+        "file_structure",
+        "implementation",
+        "algorithm",
+        "method",
+        "function",
     ]
-    structure_count = sum(1 for indicator in structure_indicators if indicator.lower() in text.lower())
+    structure_count = sum(
+        1 for indicator in structure_indicators if indicator.lower() in text.lower()
+    )
     if structure_count >= 6:
         score += 0.3
     elif structure_count >= 3:
         score += 0.15
     factors += 1
-    
+
     # 3. 句子完整性检查 (权重: 0.2)
-    lines = text.strip().split('\n')
+    lines = text.strip().split("\n")
     if lines:
         last_line = lines[-1].strip()
         # 检查最后一行是否是完整的句子或结构化内容
-        if (last_line.endswith(('.', ':', '```', '!', '?')) or 
-            last_line.startswith(('##', '-', '*', '`')) or
-            len(last_line) < 10):  # 很短的行可能是列表项
+        if (
+            last_line.endswith((".", ":", "```", "!", "?"))
+            or last_line.startswith(("##", "-", "*", "`"))
+            or len(last_line) < 10
+        ):  # 很短的行可能是列表项
             score += 0.2
-        elif len(last_line) > 50 and not last_line.endswith(('.', ':', '```', '!', '?')):
+        elif len(last_line) > 50 and not last_line.endswith(
+            (".", ":", "```", "!", "?")
+        ):
             # 长行但没有适当结尾，可能被截断
             score += 0.05
     factors += 1
-    
+
     # 4. 代码实现计划完整性 (权重: 0.3)
     implementation_keywords = [
-        "file structure", "architecture", "implementation", 
-        "requirements", "dependencies", "setup", "main",
-        "class", "function", "method", "algorithm"
+        "file structure",
+        "architecture",
+        "implementation",
+        "requirements",
+        "dependencies",
+        "setup",
+        "main",
+        "class",
+        "function",
+        "method",
+        "algorithm",
     ]
-    impl_count = sum(1 for keyword in implementation_keywords if keyword.lower() in text.lower())
+    impl_count = sum(
+        1 for keyword in implementation_keywords if keyword.lower() in text.lower()
+    )
     if impl_count >= 8:
         score += 0.3
     elif impl_count >= 4:
         score += 0.15
     factors += 1
-    
+
     return min(score, 1.0)  # 确保不超过1.0
 
 
 def _adjust_params_for_retry(params: RequestParams, retry_count: int) -> RequestParams:
     """
     动态调整请求参数以提高成功率
-    
+
     基于重试次数智能调整参数：
     - 增加token限制
     - 调整temperature
@@ -142,15 +166,17 @@ def _adjust_params_for_retry(params: RequestParams, retry_count: int) -> Request
     """
     # 基础token增量：每次重试增加更多tokens
     token_increment = 4096 * (retry_count + 1)
-    new_max_tokens = min(params.max_tokens + token_increment, 32768)  # 不超过32K的合理限制
-    
+    new_max_tokens = min(
+        params.max_tokens + token_increment, 32768
+    )  # 不超过32K的合理限制
+
     # 随着重试次数增加，降低temperature以获得更一致的输出
     new_temperature = max(params.temperature - (retry_count * 0.1), 0.1)
-    
+
     print(f"🔧 Adjusting parameters for retry {retry_count + 1}:")
     print(f"   Token limit: {params.max_tokens} → {new_max_tokens}")
     print(f"   Temperature: {params.temperature} → {new_temperature}")
-    
+
     return RequestParams(
         max_tokens=new_max_tokens,
         temperature=new_temperature,
@@ -185,8 +211,8 @@ def get_default_search_server(config_path: str = "mcp_agent.config.yaml"):
 
 
 def get_search_server_names(
-    additional_servers: Optional[List[str]] = None,
-) -> List[str]:
+    additional_servers: list[str] | None = None,
+) -> list[str]:
     """
     Get server names list with the configured default search server.
 
@@ -384,7 +410,7 @@ async def run_research_analyzer(prompt_text: str, logger) -> str:
 
     except Exception as e:
         print(f"❌ run_research_analyzer failed: {e}")
-        print(f"Exception details: {type(e).__name__}: {str(e)}")
+        print(f"Exception details: {type(e).__name__}: {e!s}")
         raise
 
 
@@ -483,13 +509,15 @@ async def run_code_analyzer(
         # 分段模式：可以使用更高的token限制，因为输入已经被优化
         max_tokens_limit = 16384  # 使用更高限制，因为分段减少了输入复杂性
         temperature = 0.2  # 稍微降低temperature以提高一致性
-        print("🧠 Using SEGMENTED mode: Higher token limit (16384) with optimized inputs")
+        print(
+            "🧠 Using SEGMENTED mode: Higher token limit (16384) with optimized inputs"
+        )
     else:
         # 传统模式：使用保守的token限制并启用增量生成
         max_tokens_limit = 12288  # 中等限制，为聚合输出留出空间
         temperature = 0.3
         print("🧠 Using TRADITIONAL mode: Moderate token limit (12288)")
-    
+
     enhanced_params = RequestParams(
         max_tokens=max_tokens_limit,
         temperature=temperature,
@@ -509,33 +537,39 @@ The goal is to create a reproduction plan detailed enough for independent implem
     # 智能输出完整性检查和重试机制
     max_retries = 3
     retry_count = 0
-    
+
     while retry_count < max_retries:
         try:
-            print(f"🚀 Attempting code analysis (attempt {retry_count + 1}/{max_retries})")
+            print(
+                f"🚀 Attempting code analysis (attempt {retry_count + 1}/{max_retries})"
+            )
             result = await code_aggregator_agent.generate_str(
                 message=message, request_params=enhanced_params
             )
-            
+
             # 检查输出完整性的高级指标
             completeness_score = _assess_output_completeness(result)
             print(f"📊 Output completeness score: {completeness_score:.2f}/1.0")
-            
+
             if completeness_score >= 0.8:  # 输出被认为是完整的
-                print(f"✅ Code analysis completed successfully (length: {len(result)} chars)")
+                print(
+                    f"✅ Code analysis completed successfully (length: {len(result)} chars)"
+                )
                 return result
             else:
-                print(f"⚠️ Output appears truncated (score: {completeness_score:.2f}), retrying with enhanced parameters...")
+                print(
+                    f"⚠️ Output appears truncated (score: {completeness_score:.2f}), retrying with enhanced parameters..."
+                )
                 # 动态调整参数进行重试
                 enhanced_params = _adjust_params_for_retry(enhanced_params, retry_count)
                 retry_count += 1
-                
+
         except Exception as e:
             print(f"❌ Error in code analysis attempt {retry_count + 1}: {e}")
             retry_count += 1
             if retry_count >= max_retries:
                 raise
-    
+
     # 如果所有重试都失败，返回最后一次的结果
     print(f"⚠️ Returning potentially incomplete result after {max_retries} attempts")
     return result
@@ -555,9 +589,7 @@ async def github_repo_download(search_result: str, paper_dir: str, logger) -> st
     """
     github_download_agent = Agent(
         name="GithubDownloadAgent",
-        instruction="Download github repo to the directory {paper_dir}/code_base".format(
-            paper_dir=paper_dir
-        ),
+        instruction=f"Download github repo to the directory {paper_dir}/code_base",
         server_names=["filesystem", "github-downloader"],
     )
 
@@ -633,8 +665,8 @@ async def _process_input_source(input_source: str, logger) -> str:
 
 
 async def orchestrate_research_analysis_agent(
-    input_source: str, logger, progress_callback: Optional[Callable] = None
-) -> Tuple[str, str]:
+    input_source: str, logger, progress_callback: Callable | None = None
+) -> tuple[str, str]:
     """
     Orchestrate intelligent research analysis and resource processing automation.
 
@@ -670,8 +702,8 @@ async def orchestrate_research_analysis_agent(
 
 
 async def synthesize_workspace_infrastructure_agent(
-    download_result: str, logger, workspace_dir: Optional[str] = None
-) -> Dict[str, str]:
+    download_result: str, logger, workspace_dir: str | None = None
+) -> dict[str, str]:
     """
     Synthesize intelligent research workspace infrastructure with automated structure generation.
 
@@ -713,7 +745,7 @@ async def synthesize_workspace_infrastructure_agent(
 
 
 async def orchestrate_reference_intelligence_agent(
-    dir_info: Dict[str, str], logger, progress_callback: Optional[Callable] = None
+    dir_info: dict[str, str], logger, progress_callback: Callable | None = None
 ) -> str:
     """
     Orchestrate intelligent reference analysis with automated research discovery.
@@ -752,8 +784,8 @@ async def orchestrate_reference_intelligence_agent(
 
 
 async def orchestrate_document_preprocessing_agent(
-    dir_info: Dict[str, str], logger
-) -> Dict[str, Any]:
+    dir_info: dict[str, str], logger
+) -> dict[str, Any]:
     """
     Orchestrate adaptive document preprocessing with intelligent segmentation control.
 
@@ -800,7 +832,7 @@ async def orchestrate_document_preprocessing_agent(
             with open(md_path, "rb") as f:
                 header = f.read(8)
                 if header.startswith(b"%PDF"):
-                    raise IOError(
+                    raise OSError(
                         f"File {md_path} is a PDF file, not a text file. Please convert it to markdown format or use PDF processing tools."
                     )
 
@@ -812,7 +844,7 @@ async def orchestrate_document_preprocessing_agent(
             dir_info["use_segmentation"] = False
             return {
                 "status": "error",
-                "error_message": f"Failed to read document: {str(e)}",
+                "error_message": f"Failed to read document: {e!s}",
                 "paper_dir": dir_info["paper_dir"],
                 "segments_ready": False,
                 "use_segmentation": False,
@@ -894,7 +926,7 @@ async def orchestrate_document_preprocessing_agent(
 
 
 async def orchestrate_code_planning_agent(
-    dir_info: Dict[str, str], logger, progress_callback: Optional[Callable] = None
+    dir_info: dict[str, str], logger, progress_callback: Callable | None = None
 ):
     """
     Orchestrate intelligent code planning with automated design analysis.
@@ -928,9 +960,9 @@ async def orchestrate_code_planning_agent(
 
 async def automate_repository_acquisition_agent(
     reference_result: str,
-    dir_info: Dict[str, str],
+    dir_info: dict[str, str],
     logger,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
 ):
     """
     Automate intelligent repository acquisition with AI-guided selection.
@@ -993,7 +1025,7 @@ async def automate_repository_acquisition_agent(
     except Exception as e:
         print(f"Error during GitHub repository download: {e}")
         # Still save the error information
-        error_message = f"GitHub download failed: {str(e)}"
+        error_message = f"GitHub download failed: {e!s}"
         with open(dir_info["download_path"], "w", encoding="utf-8") as f:
             f.write(error_message)
         print(f"GitHub download error saved to {dir_info['download_path']}")
@@ -1001,8 +1033,8 @@ async def automate_repository_acquisition_agent(
 
 
 async def orchestrate_codebase_intelligence_agent(
-    dir_info: Dict[str, str], logger, progress_callback: Optional[Callable] = None
-) -> Dict:
+    dir_info: dict[str, str], logger, progress_callback: Callable | None = None
+) -> dict:
     """
     Orchestrate intelligent codebase analysis with automated knowledge extraction.
 
@@ -1072,7 +1104,7 @@ async def orchestrate_codebase_intelligence_agent(
         print(f"Error checking code base directory: {e}")
         return {
             "status": "error",
-            "message": f"Error checking code base directory: {str(e)}",
+            "message": f"Error checking code base directory: {e!s}",
         }
 
     try:
@@ -1128,11 +1160,11 @@ async def orchestrate_codebase_intelligence_agent(
 
 
 async def synthesize_code_implementation_agent(
-    dir_info: Dict[str, str],
+    dir_info: dict[str, str],
     logger,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
     enable_indexing: bool = True,
-) -> Dict:
+) -> dict:
     """
     Synthesize intelligent code implementation with automated development.
 
@@ -1317,14 +1349,14 @@ Please provide a detailed implementation plan that covers all aspects needed for
 
     except Exception as e:
         print(f"❌ run_chat_planning_agent failed: {e}")
-        print(f"Exception details: {type(e).__name__}: {str(e)}")
+        print(f"Exception details: {type(e).__name__}: {e!s}")
         raise
 
 
 async def execute_multi_agent_research_pipeline(
     input_source: str,
     logger,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
     enable_indexing: bool = True,
 ) -> str:
     """
@@ -1518,7 +1550,7 @@ async def execute_multi_agent_research_pipeline(
 
 # Backward compatibility alias (deprecated)
 async def paper_code_preparation(
-    input_source: str, logger, progress_callback: Optional[Callable] = None
+    input_source: str, logger, progress_callback: Callable | None = None
 ) -> str:
     """
     Deprecated: Use execute_multi_agent_research_pipeline instead.
@@ -1542,7 +1574,7 @@ async def paper_code_preparation(
 async def execute_chat_based_planning_pipeline(
     user_input: str,
     logger,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
     enable_indexing: bool = True,
 ) -> str:
     """

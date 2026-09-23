@@ -7,11 +7,11 @@ DeepCode - CLI Application Main Program
 ⚡ Revolutionizing research reproducibility through collaborative AI
 """
 
+import asyncio
+import json
 import os
 import sys
-import asyncio
 import time
-import json
 
 # 禁止生成.pyc文件
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -24,8 +24,8 @@ if parent_dir not in sys.path:
 
 # 导入MCP应用和工作流
 
-from cli.workflows import CLIWorkflowAdapter
 from cli.cli_interface import CLIInterface, Colors
+from cli.workflows import CLIWorkflowAdapter
 
 
 class CLIApp:
@@ -47,7 +47,6 @@ class CLIApp:
     async def cleanup_mcp_app(self):
         """清理MCP应用 - 使用工作流适配器"""
         await self.workflow_adapter.cleanup_mcp_app()
-
 
     async def process_input(self, input_source: str, input_type: str):
         """处理输入源（URL或文件）- 使用升级版智能体编排引擎"""
@@ -258,7 +257,7 @@ class CLIApp:
         except KeyboardInterrupt:
             print(f"\n{Colors.WARNING}⚠️  Process interrupted by user{Colors.ENDC}")
         except Exception as e:
-            print(f"\n{Colors.FAIL}❌ Unexpected error: {str(e)}{Colors.ENDC}")
+            print(f"\n{Colors.FAIL}❌ Unexpected error: {e!s}{Colors.ENDC}")
         finally:
             # 清理资源
             await self.cleanup_mcp_app()
@@ -276,7 +275,7 @@ async def main():
     except KeyboardInterrupt:
         print(f"\n{Colors.WARNING}⚠️  Application interrupted by user{Colors.ENDC}")
     except Exception as e:
-        print(f"\n{Colors.FAIL}❌ Application error: {str(e)}{Colors.ENDC}")
+        print(f"\n{Colors.FAIL}❌ Application error: {e!s}{Colors.ENDC}")
     finally:
         end_time = time.time()
         print(
